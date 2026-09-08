@@ -1,0 +1,25 @@
+name: shift-import
+# 毎朝、保存セッション(JC_STATE)でジョブカンにアクセス→勤務(現月度=約40日)・申請(当月)DL→GAS集計キック。
+on:
+  schedule:
+    - cron: '0 21 * * *'   # 21:00 UTC = 翌 06:00 JST
+  workflow_dispatch: {}
+concurrency:
+  group: jc-session          # shift-tick と同時実行を避ける（同一セッションの取り合い防止）
+  cancel-in-progress: false
+jobs:
+  import:
+    runs-on: ubuntu-latest
+    timeout-minutes: 28
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with: { node-version: '20' }
+      - run: npm ci || npm install
+      - run: npx playwright install --with-deps chromium
+      - run: node src/main.js
+        env:
+          JC_STATE: ${{ secrets.JC_STATE }}
+          GAS_WEBAPP_URL: ${{ secrets.GAS_WEBAPP_URL }}
+          RUN_SECRET: ${{ secrets.RUN_SECRET }}
+          SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}

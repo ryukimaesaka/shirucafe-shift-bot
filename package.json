@@ -1,0 +1,15 @@
+{
+  "name": "shirucafe-shift-rpa",
+  "version": "1.0.0",
+  "private": true,
+  "type": "commonjs",
+  "description": "知るカフェ シフト管理: ジョブカンからCSVを自動DLしGoogleシートへ反映→GAS集計をキック（GitHub Actions RPA）",
+  "scripts": {
+    "spike": "node spike.js",
+    "run": "node src/main.js"
+  },
+  "dependencies": {
+    "playwright": "1.47.0",
+    "googleapis": "^144.0.0"
+  }
+}

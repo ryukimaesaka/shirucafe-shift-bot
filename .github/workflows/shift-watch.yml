@@ -1,0 +1,37 @@
+name: shift-watch
+# OP(開店)シフトイン遅れの見張り。3分おきに実行し、未打刻の遅刻をSlackへ。
+# スタンプが押されるまで3分おきに再通知（停止条件はスタンプのみ）。
+# ※GitHub Actionsのschedule(cron)は遅延・間引きが大きいため、本番の3分間隔は
+#   cron-job.org から workflow_dispatch を叩いて駆動する（shift-import/shift-tickと同型）。
+on:
+  workflow_dispatch:
+    inputs:
+      test:
+        description: 'テスト実行（ジョブカン抜きでダミー1件を投稿してSlack動作確認）'
+        type: boolean
+        default: false
+  schedule:
+    - cron: '*/15 * * * *'   # 保険。実際の3分間隔は cron-job.org で駆動。
+concurrency:
+  group: shift-watch         # 見張りは専用グループ。3分間隔が import/tick に妨げられないよう独立させる。
+  cancel-in-progress: false
+jobs:
+  watch:
+    runs-on: ubuntu-latest
+    # ブラウザ同梱の公式イメージ（playwright installステップ不要＝高速・安定。3分間隔なので重要）
+    container:
+      image: mcr.microsoft.com/playwright:v1.47.0-jammy
+    timeout-minutes: 8
+    steps:
+      - uses: actions/checkout@v4
+      - run: npm install
+      - run: node src/shift-watch.js
+        env:
+          WATCH_TEST: ${{ github.event.inputs.test == 'true' && '1' || '' }}
+          JC_STATE: ${{ secrets.JC_STATE }}
+          SLACK_BOT_TOKEN: ${{ secrets.SLACK_BOT_TOKEN }}
+          SLACK_CHANNEL_ID: ${{ secrets.SLACK_CHANNEL_ID }}
+          MENTION_IDS: ${{ secrets.MENTION_IDS }}
+          GRACE_MIN: '10'
+          OPEN_FROM: '6'
+          OPEN_TO: '23'

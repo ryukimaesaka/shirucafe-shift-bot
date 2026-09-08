@@ -1,0 +1,27 @@
+name: shift-tick
+# 15分毎に外部cron(cron-job.org)からworkflow_dispatchで起動される。
+#  ・毎回: ジョブカンにアクセス＝セッション延命(keepalive)。
+# ※OP遅刻のリアルタイム検知＋通知は shift-watch.js に移管（Bot Token/メンション/スタンプ停止）。
+# GitHubのscheduleは間引かれて不安定なので使わない（外部cronで確実に15分毎に叩く）。
+on:
+  workflow_dispatch: {}
+concurrency:
+  group: shift-tick          # importとは別グループ。取込(約15分)中にtickがスキップされないよう分離。
+  cancel-in-progress: false
+permissions:
+  contents: read
+jobs:
+  tick:
+    runs-on: ubuntu-latest
+    # ブラウザ同梱の公式イメージ（playwright installステップ不要＝高速・安定）
+    container:
+      image: mcr.microsoft.com/playwright:v1.47.0-jammy
+    timeout-minutes: 8
+    steps:
+      - uses: actions/checkout@v4
+      - run: npm install
+      - run: node src/tick.js
+        env:
+          JC_STATE: ${{ secrets.JC_STATE }}
+          SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}
+          GITHUB_REPOSITORY: ${{ github.repository }}

@@ -1,0 +1,11 @@
+node_modules/
+.DS_Store
+.env
+sa.json
+downloads/
+*.csv
+# セッション・一時ファイル（公開リポジトリに絶対入れない）
+jc_state.json
+state.json
+state.new.json
+*.state.json
