@@ -32,6 +32,6 @@ jobs:
           SLACK_BOT_TOKEN: ${{ secrets.SLACK_BOT_TOKEN }}
           SLACK_CHANNEL_ID: ${{ secrets.SLACK_CHANNEL_ID }}
           MENTION_IDS: ${{ secrets.MENTION_IDS }}
-          GRACE_MIN: '10'
+          GRACE_MIN: '5'
           OPEN_FROM: '6'
           OPEN_TO: '23'
