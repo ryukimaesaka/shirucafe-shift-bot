@@ -30,6 +30,7 @@ const TOKEN = process.env.SLACK_BOT_TOKEN || '';
 const CHANNEL = process.env.SLACK_CHANNEL_ID || '';
 const MENTIONS = (process.env.MENTION_IDS || '').split(',').map((s) => s.trim()).filter(Boolean);
 const GRACE_MIN = parseInt(process.env.GRACE_MIN || '10', 10);
+const NAG_MIN = parseInt(process.env.NAG_MIN || '5', 10);   // 同じ案件を再通知する最小間隔(分)。cronが速くてもこれで律速。
 const OPEN_FROM = parseInt(process.env.OPEN_FROM || '6', 10);
 const OPEN_TO = parseInt(process.env.OPEN_TO || '23', 10);
 
@@ -72,9 +73,14 @@ async function loadTodayCases(dateStr) {
       const key = mt[0];
       if (key.indexOf(dateStr) < 0) continue; // 当日分だけ
       const hasReaction = Array.isArray(m.reactions) && m.reactions.length > 0;
+      const ts = parseFloat(m.ts) || 0; // 投稿時刻(epoch秒)。再通知の間隔判定に使う。
       const prev = map.get(key);
-      // 同一ケースに複数投稿があっても、どれか1つでもリアクションがあれば「確認済み」
-      map.set(key, { hasReaction: (prev && prev.hasReaction) || hasReaction });
+      // 同一ケースに複数投稿があっても、どれか1つでもリアクションがあれば「確認済み」。
+      // lastTs は最新(最大)の投稿時刻。
+      map.set(key, {
+        hasReaction: (prev && prev.hasReaction) || hasReaction,
+        lastTs: Math.max((prev && prev.lastTs) || 0, ts),
+      });
     }
     cursor = res.response_metadata && res.response_metadata.next_cursor;
   } while (cursor);
@@ -203,12 +209,17 @@ async function detectLateOpenShifts(page, now) {
     }
   }
 
-  // 検知ケースごとに: 未投稿→新規投稿 / 投稿済み&未スタンプ→再通知 / スタンプ有り→停止
+  // 検知ケースごとに: 未投稿→新規投稿 / 投稿済み&未スタンプ→NAG_MIN経過なら再通知 / スタンプ有り→停止
+  const nowSec = Date.now() / 1000;
   for (const c of late) {
     const key = caseKey(dateStr, c.store, c.staff);
     const existing = cases.get(key);
     if (existing && existing.hasReaction) { console.log('確認済み(停止):', key); continue; }
-    // 新規でも、未確認の継続でも「投稿」する＝3分おきに来続ける
+    // 再通知スロットル: 前回投稿から NAG_MIN 未満なら見送る（cronが速くても通知は必ずNAG_MIN間隔になる）。
+    if (existing && existing.lastTs && (nowSec - existing.lastTs) < NAG_MIN * 60) {
+      console.log('間隔内でスキップ(' + Math.round(nowSec - existing.lastTs) + 's<' + NAG_MIN * 60 + 's):', key);
+      continue;
+    }
     await slackApi('chat.postMessage', { channel: CHANNEL, text: buildMessage(now, c, dateStr) });
     console.log((existing ? '再通知' : '新規通知') + ':', key);
   }

@@ -33,5 +33,6 @@ jobs:
           SLACK_CHANNEL_ID: ${{ secrets.SLACK_CHANNEL_ID }}
           MENTION_IDS: ${{ secrets.MENTION_IDS }}
           GRACE_MIN: '5'
+          NAG_MIN: '5'
           OPEN_FROM: '6'
           OPEN_TO: '23'
