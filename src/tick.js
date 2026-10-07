@@ -41,7 +41,8 @@ async function slack(text) {
     const alertExpiryAllowed = () => (nowMinJst() % 60) < 15;
 
     // ① keepalive も兼ねてアクセス（このgoto自体がセッション延命になる）
-    await page.goto(WORK_STATE_URL, { waitUntil: 'networkidle', timeout: 60000 });
+    // ※work-stateは常時通信があり 'networkidle' に到達せずタイムアウトすることがあるため domcontentloaded に。
+    await page.goto(WORK_STATE_URL, { waitUntil: 'domcontentloaded', timeout: 60000 });
     if (/\/login\//.test(page.url())) {
       if (alertExpiryAllowed()) await slack('⚠️ jobcan: セッション切れ。`node login.js`で JC_STATE 更新を: ' + SECRETS_URL);
       else log('セッション切れ（通知抑制中: 1時間に1回のみ）');
