@@ -1,17 +1,17 @@
 name: shift-watch
-# OP(開店)シフトイン遅れの見張り。3分おきに実行し、未打刻の遅刻をSlackへ。
-# スタンプが押されるまで3分おきに再通知（停止条件はスタンプのみ）。
-# ※GitHub Actionsのschedule(cron)は遅延・間引きが大きいため、本番の3分間隔は
+# OP(開店)シフトイン遅れの見張り。5分おきに実行し、未打刻の遅刻を LINE WORKS グループへ @All で1回通知。
+# 「1回だけ」は shift-watch.js の窓方式（elapsed∈[GRACE,GRACE+WINDOW)）で実現。再通知・停止なし。
+# ※GitHub Actionsのschedule(cron)は遅延・間引きが大きいため、本番の5分間隔は
 #   cron-job.org から workflow_dispatch を叩いて駆動する（shift-import/shift-tickと同型）。
 on:
   workflow_dispatch:
     inputs:
       test:
-        description: 'テスト実行（ジョブカン抜きでダミー1件を投稿してSlack動作確認）'
+        description: 'テスト実行（ジョブカン抜きでダミー1件を LINE WORKS に@All投稿して疎通確認）'
         type: boolean
         default: false
   schedule:
-    - cron: '*/15 * * * *'   # 保険。実際の3分間隔は cron-job.org で駆動。
+    - cron: '*/15 * * * *'   # 保険。実際の5分間隔は cron-job.org で駆動。
 concurrency:
   group: shift-watch         # 見張りは専用グループ。3分間隔が import/tick に妨げられないよう独立させる。
   cancel-in-progress: false
@@ -29,10 +29,13 @@ jobs:
         env:
           WATCH_TEST: ${{ github.event.inputs.test == 'true' && '1' || '' }}
           JC_STATE: ${{ secrets.JC_STATE }}
-          SLACK_BOT_TOKEN: ${{ secrets.SLACK_BOT_TOKEN }}
-          SLACK_CHANNEL_ID: ${{ secrets.SLACK_CHANNEL_ID }}
-          MENTION_IDS: ${{ secrets.MENTION_IDS }}
+          LW_CLIENT_ID: ${{ secrets.LW_CLIENT_ID }}
+          LW_CLIENT_SECRET: ${{ secrets.LW_CLIENT_SECRET }}
+          LW_SERVICE_ACCOUNT: ${{ secrets.LW_SERVICE_ACCOUNT }}
+          LW_PRIVATE_KEY: ${{ secrets.LW_PRIVATE_KEY }}
+          LW_BOT_ID: ${{ secrets.LW_BOT_ID }}
+          LW_CHANNEL_ID: ${{ secrets.LW_CHANNEL_ID }}
           GRACE_MIN: '5'
-          NAG_MIN: '5'
+          ALERT_WINDOW_MIN: '5'
           OPEN_FROM: '6'
           OPEN_TO: '23'
