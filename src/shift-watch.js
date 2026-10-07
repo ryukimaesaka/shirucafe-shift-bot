@@ -36,6 +36,13 @@ const LW_BOT_ID = process.env.LW_BOT_ID || '';
 const LW_CHANNEL_MAP = (() => { try { return JSON.parse(process.env.LW_CHANNEL_MAP || '{}'); } catch (_) { return {}; } })();
 // 未マッピング店舗の送り先（任意。管理グループ等）。未設定ならスキップしてログのみ。
 const LW_DEFAULT_CHANNEL_ID = process.env.LW_DEFAULT_CHANNEL_ID || '';
+// 運用通知(未登録店の検知)用のSlack Webhook。LINE WORKS通知とは別の管理者向けオペ通知。
+const SLACK_WEBHOOK_URL = process.env.SLACK_WEBHOOK_URL || '';
+async function slackNotice(text) {
+  if (!SLACK_WEBHOOK_URL) { console.log('SLACK(未設定):', text); return; }
+  try { await fetch(SLACK_WEBHOOK_URL, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ text }) }); }
+  catch (e) { console.log('slack通知失敗', e.message); }
+}
 
 const GRACE_MIN = parseInt(process.env.GRACE_MIN || '5', 10);
 const WINDOW_MIN = parseInt(process.env.ALERT_WINDOW_MIN || '5', 10); // 窓幅=cron間隔。これで「1回だけ」になる
@@ -135,6 +142,14 @@ async function detectLateOpenShifts(page, now) {
   const opStart = {};
   rows.forEach((r) => { const p = parseRow(r); if (p.start == null) return; if (opStart[p.store] == null || p.start < opStart[p.store]) opStart[p.store] = p.start; });
 
+  // 当日ジョブカンに出現する全店舗（番号→店舗名）。未登録店の検知に使う。
+  const storesByNum = {};
+  rows.forEach((r) => {
+    const p = parseRow(r);
+    const m = String(p.store).match(/^(\d{2,3})/);
+    if (m) storesByNum[m[1]] = p.store;
+  });
+
   const nowMin = now.getUTCHours() * 60 + now.getUTCMinutes();
   const late = [];
   rows.forEach((r) => {
@@ -147,7 +162,7 @@ async function detectLateOpenShifts(page, now) {
     const stH = pad2(Math.floor(p.start / 60)), stM = pad2(p.start % 60);
     late.push({ store: p.store, staff: p.name, startHHMM: stH + ':' + stM, elapsedMin: over });
   });
-  return late;
+  return { late, storesByNum };
 }
 
 // ---- メイン ----------------------------------------------------------------
@@ -181,6 +196,7 @@ async function detectLateOpenShifts(page, now) {
   const anyChannel = () => LW_DEFAULT_CHANNEL_ID || Object.values(LW_CHANNEL_MAP)[0] || '';
 
   let late = [];
+  let storesByNum = {};
   if (TEST) {
     // マップにある店舗でルーティングも検証（101同志社があればそこへ届く）
     late = [{ store: '101同志社大学前店', staff: 'テスト 太郎', startHHMM: '13:40', elapsedMin: 6 }];
@@ -199,9 +215,22 @@ async function detectLateOpenShifts(page, now) {
         try { const ch = anyChannel(); if (ch) await lwPostChannel(await lwToken(), ch, '⚠️ 遅刻ウォッチャー: ジョブカンのセッション切れ。`node login.js`→JC_STATE更新を。'); } catch (_) {}
         await ctx.close(); await browser.close(); process.exit(20);
       }
-      late = await detectLateOpenShifts(page, now);
+      const res = await detectLateOpenShifts(page, now);
+      late = res.late; storesByNum = res.storesByNum || {};
     } finally {
       try { await ctx.close(); await browser.close(); } catch (_) {}
+    }
+  }
+
+  // ▼ 新店(未登録)検知: ジョブカンに居るが LW_CHANNEL_MAP に無い店番号 → 毎日10時台に1回Slack通知。
+  //   （新店が増えたら「遅刻報告BOT招待＋チャンネルID取得→LW_CHANNEL_MAP追記」が必要、という運用アラート）
+  if (!TEST) {
+    const unmapped = Object.entries(storesByNum).filter(([num]) => !LW_CHANNEL_MAP[num]);
+    if (unmapped.length) {
+      console.log('未登録店舗（LW_CHANNEL_MAP未設定）:', unmapped.map(([, s]) => s).join(', '));
+      if (now.getUTCHours() === 10 && now.getUTCMinutes() < 5) { // JST10:00台に1回だけ
+        await slackNotice('⚠️ シフト遅刻通知：LINE WORKS未登録の店舗があります（このままだと遅刻通知が店舗グループに届きません）。\n各店で「遅刻報告BOT」を招待→チャンネルID取得→Secret `LW_CHANNEL_MAP` に追記してください（手順: shift-kanri/HANDOFF.md）。\n未登録:\n' + unmapped.map(([, s]) => '・' + s).join('\n'));
+      }
     }
   }
 
@@ -209,13 +238,23 @@ async function detectLateOpenShifts(page, now) {
 
   // 店舗別ルーティング: 遅刻ケースを channelId 単位にまとめ、各店のグループへ @All で1回ずつ投稿
   const byChannel = new Map(); // channelId -> cases[]
+  const unmappedLate = [];     // 送り先未登録の遅刻（取りこぼし防止でSlackへ）
   for (const c of late) {
     const ch = channelFor(c.store);
-    if (!ch) { console.log('未マッピング店舗（スキップ）:', c.store); continue; }
+    if (!ch) { unmappedLate.push(c); continue; }
     if (!byChannel.has(ch)) byChannel.set(ch, []);
     byChannel.get(ch).push(c);
   }
-  if (!byChannel.size) { console.log('送信対象なし（全て未マッピング）'); return; }
+
+  // 未登録店の遅刻は店舗グループに出せないので、取りこぼさないようSlackへ退避通知。
+  if (unmappedLate.length) {
+    await slackNotice('🔴 OP遅れ（LINE WORKS未登録店のためSlackへ退避）:\n'
+      + unmappedLate.map((c) => `・${c.store} ${c.staff} OP ${c.startHHMM}（${c.elapsedMin}分経過・未打刻）`).join('\n')
+      + '\n※この店をLINE WORKS通知に載せるには LW_CHANNEL_MAP への登録が必要です。');
+    console.log('未マッピング遅刻→Slack退避:', unmappedLate.map((c) => c.store).join(', '));
+  }
+
+  if (!byChannel.size) { console.log('LINE WORKS送信対象なし', hhmm(now)); return; }
 
   const token = await lwToken();
   for (const [ch, cases] of byChannel) {
