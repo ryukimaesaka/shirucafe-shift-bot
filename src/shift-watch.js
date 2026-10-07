@@ -14,7 +14,8 @@
 //   LW_SERVICE_ACCOUNT … 同 Service Account（xxxx.xxxx@domain 形式）
 //   LW_PRIVATE_KEY     … 同 Private Key（PEM全文。\n を含む）
 //   LW_BOT_ID          … Bot No.(Bot ID)
-//   LW_CHANNEL_ID      … 投稿先トークルームの channelId
+//   LW_CHANNEL_MAP     … 店舗別ルーティング。店舗番号→channelId のJSON（例 {"101":"18588256","118":"..."}）
+//   LW_DEFAULT_CHANNEL_ID … 任意。未マッピング店舗の送り先（管理グループ等）。無ければスキップ
 //   GRACE_MIN(=5) / ALERT_WINDOW_MIN(=5=cron間隔) / OPEN_FROM(=6) / OPEN_TO(=23)
 //   WATCH_TEST=1       … ジョブカン抜きでダミー1件を投稿して疎通確認
 
@@ -31,7 +32,10 @@ const LW_CLIENT_SECRET = process.env.LW_CLIENT_SECRET || '';
 const LW_SERVICE_ACCOUNT = process.env.LW_SERVICE_ACCOUNT || '';
 const LW_PRIVATE_KEY = (process.env.LW_PRIVATE_KEY || '').replace(/\\n/g, '\n'); // Secretに\nで入っても実改行に戻す
 const LW_BOT_ID = process.env.LW_BOT_ID || '';
-const LW_CHANNEL_ID = process.env.LW_CHANNEL_ID || '';
+// 店舗別ルーティング: 店舗番号 → channelId のJSONマップ（例 {"101":"18588256","118":"..."}）。
+const LW_CHANNEL_MAP = (() => { try { return JSON.parse(process.env.LW_CHANNEL_MAP || '{}'); } catch (_) { return {}; } })();
+// 未マッピング店舗の送り先（任意。管理グループ等）。未設定ならスキップしてログのみ。
+const LW_DEFAULT_CHANNEL_ID = process.env.LW_DEFAULT_CHANNEL_ID || '';
 
 const GRACE_MIN = parseInt(process.env.GRACE_MIN || '5', 10);
 const WINDOW_MIN = parseInt(process.env.ALERT_WINDOW_MIN || '5', 10); // 窓幅=cron間隔。これで「1回だけ」になる
@@ -68,8 +72,8 @@ async function lwToken() {
   return r.access_token;
 }
 // トークルームへ送信（@All は text 内の <m userId="all"> で表現）
-async function lwPostChannel(token, text) {
-  const url = `https://www.worksapis.com/v1.0/bots/${LW_BOT_ID}/channels/${LW_CHANNEL_ID}/messages`;
+async function lwPostChannel(token, channelId, text) {
+  const url = `https://www.worksapis.com/v1.0/bots/${LW_BOT_ID}/channels/${channelId}/messages`;
   const r = await fetch(url, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json', Authorization: 'Bearer ' + token },
@@ -93,8 +97,10 @@ const WORK_STATE_URL = 'https://ssl.jobcan.jp/client/work-state/show/?submit_typ
   + '&work_kind[4]=-1&work_kind[5]=-1&work_kind[6]=-1&work_kind[7]=-1&group_id=0';
 
 async function detectLateOpenShifts(page, now) {
-  await page.goto(WORK_STATE_URL, { waitUntil: 'networkidle', timeout: 60000 });
+  // ※work-stateは常時通信があり 'networkidle' だとタイムアウトするため domcontentloaded＋表の出現待ち。
+  await page.goto(WORK_STATE_URL, { waitUntil: 'domcontentloaded', timeout: 60000 });
   if (/\/login\//.test(page.url())) throw new Error('NEED_LOGIN');
+  await page.waitForSelector('table', { timeout: 30000 }).catch(() => {});
 
   const rows = await page.evaluate(() => {
     const tables = [...document.querySelectorAll('table')];
@@ -149,22 +155,36 @@ async function detectLateOpenShifts(page, now) {
   const required = [
     ['LW_CLIENT_ID', LW_CLIENT_ID], ['LW_CLIENT_SECRET', LW_CLIENT_SECRET],
     ['LW_SERVICE_ACCOUNT', LW_SERVICE_ACCOUNT], ['LW_PRIVATE_KEY', LW_PRIVATE_KEY],
-    ['LW_BOT_ID', LW_BOT_ID], ['LW_CHANNEL_ID', LW_CHANNEL_ID],
+    ['LW_BOT_ID', LW_BOT_ID],
   ];
   if (!TEST) required.push(['JC_STATE', STATE_B64]);
   for (const [k, v] of required) {
     if (!v) { console.error('環境変数未設定:', k); process.exit(1); }
   }
+  if (!Object.keys(LW_CHANNEL_MAP).length && !LW_DEFAULT_CHANNEL_ID) {
+    console.error('環境変数未設定: LW_CHANNEL_MAP（店舗番号→channelId のJSON）'); process.exit(1);
+  }
+
+  // 店舗番号 → channelId を引く（番号は店舗文字列先頭の数字。無ければDEFAULT）
+  const channelFor = (store) => {
+    const m = String(store).match(/^(\d{2,3})/);
+    const num = m ? m[1] : '';
+    return (num && LW_CHANNEL_MAP[num]) || LW_DEFAULT_CHANNEL_ID || '';
+  };
 
   const now = jstNow();
   if (!TEST && (now.getUTCHours() < OPEN_FROM || now.getUTCHours() >= OPEN_TO)) {
     console.log('監視時間外', hhmm(now)); return;
   }
 
+  // 送り先不明時の保険（セッション切れ通知等）。DEFAULT→マップ先頭の順で1つ。
+  const anyChannel = () => LW_DEFAULT_CHANNEL_ID || Object.values(LW_CHANNEL_MAP)[0] || '';
+
   let late = [];
   if (TEST) {
-    late = [{ store: '118関西学院大学前店', staff: '吉見 光生', startHHMM: '13:40', elapsedMin: 6 }];
-    console.log('WATCH_TEST: ダミー1件で@All疎通確認');
+    // マップにある店舗でルーティングも検証（101同志社があればそこへ届く）
+    late = [{ store: '101同志社大学前店', staff: 'テスト 太郎', startHHMM: '13:40', elapsedMin: 6 }];
+    console.log('WATCH_TEST: ダミー1件で店舗別ルーティング＋@All疎通確認');
   } else {
     fs.writeFileSync('jc_state.json', Buffer.from(STATE_B64, 'base64'));
     const browser = await chromium.launch({ headless: true, args: ['--no-sandbox', '--disable-dev-shm-usage'] });
@@ -175,8 +195,8 @@ async function detectLateOpenShifts(page, now) {
     const page = await ctx.newPage();
     try {
       if (!(await checkLoggedIn(page))) {
-        // セッション切れは監視の生命線。LINE WORKSへ（@Allなしで）通知して失敗終了。
-        try { await lwPostChannel(await lwToken(), '⚠️ 遅刻ウォッチャー: ジョブカンのセッション切れ。`node login.js`→JC_STATE更新を。'); } catch (_) {}
+        // セッション切れは監視の生命線。LINE WORKSへ（@Allなしで・保険の1チャンネルへ）通知して失敗終了。
+        try { const ch = anyChannel(); if (ch) await lwPostChannel(await lwToken(), ch, '⚠️ 遅刻ウォッチャー: ジョブカンのセッション切れ。`node login.js`→JC_STATE更新を。'); } catch (_) {}
         await ctx.close(); await browser.close(); process.exit(20);
       }
       late = await detectLateOpenShifts(page, now);
@@ -187,8 +207,19 @@ async function detectLateOpenShifts(page, now) {
 
   if (!late.length) { console.log('OP遅刻なし', hhmm(now)); return; }
 
-  // 1通にまとめて @All で1回だけ投稿
+  // 店舗別ルーティング: 遅刻ケースを channelId 単位にまとめ、各店のグループへ @All で1回ずつ投稿
+  const byChannel = new Map(); // channelId -> cases[]
+  for (const c of late) {
+    const ch = channelFor(c.store);
+    if (!ch) { console.log('未マッピング店舗（スキップ）:', c.store); continue; }
+    if (!byChannel.has(ch)) byChannel.set(ch, []);
+    byChannel.get(ch).push(c);
+  }
+  if (!byChannel.size) { console.log('送信対象なし（全て未マッピング）'); return; }
+
   const token = await lwToken();
-  await lwPostChannel(token, buildMessage(now, late));
-  console.log('LINE WORKS通知 完了:', late.map((c) => c.store + '/' + c.staff).join(', '));
+  for (const [ch, cases] of byChannel) {
+    await lwPostChannel(token, ch, buildMessage(now, cases));
+    console.log('LINE WORKS通知 完了 ch=' + ch + ':', cases.map((c) => c.store + '/' + c.staff).join(', '));
+  }
 })().catch((e) => { console.error(e); process.exit(1); });

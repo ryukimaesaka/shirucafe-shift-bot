@@ -34,7 +34,8 @@ jobs:
           LW_SERVICE_ACCOUNT: ${{ secrets.LW_SERVICE_ACCOUNT }}
           LW_PRIVATE_KEY: ${{ secrets.LW_PRIVATE_KEY }}
           LW_BOT_ID: ${{ secrets.LW_BOT_ID }}
-          LW_CHANNEL_ID: ${{ secrets.LW_CHANNEL_ID }}
+          LW_CHANNEL_MAP: ${{ secrets.LW_CHANNEL_MAP }}
+          LW_DEFAULT_CHANNEL_ID: ${{ secrets.LW_DEFAULT_CHANNEL_ID }}
           GRACE_MIN: '5'
           ALERT_WINDOW_MIN: '5'
           OPEN_FROM: '6'
