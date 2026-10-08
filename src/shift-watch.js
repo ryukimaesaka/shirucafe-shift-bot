@@ -60,15 +60,35 @@ const OPEN_TO = parseInt(process.env.OPEN_TO || '23', 10);
 // ※本番のシフト取込GAS(GAS_WEBAPP_URL)とは別エンドポイント。混同しないよう LWW_WEBAPP_URL を使う。
 const LWW_WEBAPP_URL = process.env.LWW_WEBAPP_URL || '';
 const RUN_SECRET = process.env.RUN_SECRET || '';
+// GASの /exec はPOST応答を302でgoogleusercontentへ飛ばす仕様で、稀にリダイレクト先がHTMLエラーを返す。
+// その場合 r.json() が失敗する（＝状態取得できず窓方式フォールバックに落ちる）ため、最大3回リトライする。
 async function gasLww(payload) {
   if (!LWW_WEBAPP_URL || !RUN_SECRET) return null;
-  try {
-    return await fetch(LWW_WEBAPP_URL, {
-      method: 'POST', headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(Object.assign({ secret: RUN_SECRET }, payload)),
-      signal: AbortSignal.timeout(30000),
-    }).then((r) => r.json());
-  } catch (e) { console.log('GAS lww失敗', e.message); return null; }
+  const body = JSON.stringify(Object.assign({ secret: RUN_SECRET }, payload));
+  // 'alert'(書込み)はdoPost到達時点で状態が書かれる＝応答がHTMLでも成功。リトライすると二重加算になるので1回のみ。
+  // 'get'(読み取り)は冪等で、応答JSONが必要。リダイレクト揺らぎでHTMLが返ることがあるので最大3回リトライ。
+  const maxAttempts = payload && payload.lww === 'alert' ? 1 : 3;
+  for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+    try {
+      const r = await fetch(LWW_WEBAPP_URL, {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body, redirect: 'follow', signal: AbortSignal.timeout(30000),
+      });
+      const text = await r.text();
+      try {
+        const json = JSON.parse(text);           // 正常なJSON応答
+        if (json && json.ok === false) console.log('GAS lww ok:false', JSON.stringify(json).slice(0, 120));
+        return json;
+      } catch (_) {
+        console.log(`GAS lww 非JSON応答(${payload && payload.lww} attempt ${attempt}/${maxAttempts}) len=${text.length}`);
+        if (maxAttempts === 1) return null;      // alert: 応答は使わないのでそのまま
+      }
+    } catch (e) {
+      console.log(`GAS lww 通信失敗(${payload && payload.lww} attempt ${attempt}/${maxAttempts})`, e.message);
+    }
+    if (attempt < maxAttempts) await new Promise((res) => setTimeout(res, 1500));
+  }
+  return null;
 }
 
 const pad2 = (n) => String(n).padStart(2, '0');
