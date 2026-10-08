@@ -1,11 +1,14 @@
-// shift-watch.js — OP(開店)シフトイン遅れを LINE WORKS グループへ「1回だけ @All」で通知
+// shift-watch.js — OP(開店)シフトイン遅れを LINE WORKS 店舗グループへ @All で通知（15分再送あり）
 // ------------------------------------------------------------------
-// 仕様（2026-10-07 確定）:
-//   ・各店その日いちばん最初のシフト=OP(開店担当) が「開始+GRACE分」経過しても未打刻なら遅刻。
-//   ・遅刻を検知したら LINE WORKS Bot API でグループへ投稿し、本文に <m userId="all">（＝@All）を付ける。
-//   ・通知は「1回だけ」。状態保存なしの“窓方式”で実現：elapsed が [GRACE, GRACE+WINDOW) に入った
-//     ポーリング回だけ投稿する（cron間隔==WINDOWなら各ケース1回だけ命中）。再通知・停止・ackは無し。
-//   ・本人が打刻すれば '未出勤' から外れて自然に対象外になる。
+// 仕様（2026-10-08 更新）:
+//   ・各店その日いちばん最初のシフト=OP(開店担当) が「開始+GRACE分」経過しても未打刻なら遅刻（上限なし）。
+//   ・遅刻を検知したら店舗別ルーティング(LW_CHANNEL_MAP)で該当グループへ投稿、本文に <m userId="all">（＝@All）。
+//   ・初回通知後、そのグループで「返信」も「本人の打刻」も無ければ RESEND_MIN(=15分)おきに同じ文を再送。
+//     送信回数は MAX_SENDS(=4=初回+最大3回再送)で打ち止め。
+//   ・停止条件: ①本人が打刻→'未出勤'から外れ late に出なくなり自然停止 ②グループで返信あり（専用GASが
+//     コールバックで最終返信時刻を記録／shift-watchが初回アラート後の返信を検知）③MAX_SENDS到達。
+//   ・再送の状態（日付/回数/初回・最終アラート時刻/最終返信時刻）は専用GAS(lww-webapp)に保存。GAS未設定時は
+//     状態が取れず毎回「初回」になり多重投稿になるため、LWW_WEBAPP_URL と RUN_SECRET は必ず設定すること。
 //
 // 必要な Secret / 環境変数:
 //   JC_STATE           … 保存セッション(base64)。login.js で作成（Bot専用アカウント）
@@ -16,8 +19,11 @@
 //   LW_BOT_ID          … Bot No.(Bot ID)
 //   LW_CHANNEL_MAP     … 店舗別ルーティング。店舗番号→channelId のJSON（例 {"101":"18588256","118":"..."}）
 //   LW_DEFAULT_CHANNEL_ID … 任意。未マッピング店舗の送り先（管理グループ等）。無ければスキップ
-//   GRACE_MIN(=5) / ALERT_WINDOW_MIN(=5=cron間隔) / OPEN_FROM(=6) / OPEN_TO(=23)
-//   WATCH_TEST=1       … ジョブカン抜きでダミー1件を投稿して疎通確認
+//   LWW_WEBAPP_URL     … 専用GAS(lww-webapp)の /exec URL。再送の状態管理＋返信検知に使用
+//   RUN_SECRET         … 専用GASの状態API認証用の共有シークレット（GASのScriptPropertyと同値）
+//   GRACE_MIN(=5) / RESEND_MIN(=15) / MAX_SENDS(=4) / OPEN_FROM(=6) / OPEN_TO(=23)
+//   SLACK_WEBHOOK_URL  … 任意。未登録店の検知や退避通知など管理者向けオペ通知
+//   WATCH_TEST=1       … ジョブカン抜きでダミー1件を投稿して疎通確認（状態管理なしで1回だけ）
 
 const fs = require('fs');
 const crypto = require('crypto');
@@ -45,12 +51,30 @@ async function slackNotice(text) {
 }
 
 const GRACE_MIN = parseInt(process.env.GRACE_MIN || '5', 10);
-const WINDOW_MIN = parseInt(process.env.ALERT_WINDOW_MIN || '5', 10); // 窓幅=cron間隔。これで「1回だけ」になる
+const RESEND_MIN = parseInt(process.env.RESEND_MIN || '15', 10); // 返信/打刻が無いとき再送する間隔(分)
+const MAX_SENDS = parseInt(process.env.MAX_SENDS || '4', 10);    // 初回含む最大送信回数(=初回+最大3回再送)
 const OPEN_FROM = parseInt(process.env.OPEN_FROM || '6', 10);
 const OPEN_TO = parseInt(process.env.OPEN_TO || '23', 10);
 
+// 専用GAS(lww-webapp)で「各グループの最終返信時刻／アラート状態」を管理（返信検知＝再送停止用）。
+// ※本番のシフト取込GAS(GAS_WEBAPP_URL)とは別エンドポイント。混同しないよう LWW_WEBAPP_URL を使う。
+const LWW_WEBAPP_URL = process.env.LWW_WEBAPP_URL || '';
+const RUN_SECRET = process.env.RUN_SECRET || '';
+async function gasLww(payload) {
+  if (!LWW_WEBAPP_URL || !RUN_SECRET) return null;
+  try {
+    return await fetch(LWW_WEBAPP_URL, {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(Object.assign({ secret: RUN_SECRET }, payload)),
+      signal: AbortSignal.timeout(30000),
+    }).then((r) => r.json());
+  } catch (e) { console.log('GAS lww失敗', e.message); return null; }
+}
+
 const pad2 = (n) => String(n).padStart(2, '0');
 const hhmm = (d) => pad2(d.getUTCHours()) + ':' + pad2(d.getUTCMinutes()); // jstNow()はUTCフィールドにJSTを載せる規約
+// JSTの日付キー（YYYY-MM-DD）。日付が変わればアラート状態はリセットされる（前日分を引きずらない）。
+const todayKey = (d) => d.getUTCFullYear() + '-' + pad2(d.getUTCMonth() + 1) + '-' + pad2(d.getUTCDate());
 
 // ---- LINE WORKS 認証（Service Account JWT → アクセストークン） ------------
 function b64url(buf) {
@@ -158,7 +182,7 @@ async function detectLateOpenShifts(page, now) {
     if (p.start == null) return;
     if (p.start !== opStart[p.store]) return;            // OP(最も早いシフト)だけ
     const over = nowMin - p.start;
-    if (over < GRACE_MIN || over >= GRACE_MIN + WINDOW_MIN) return; // 窓方式＝1回だけ
+    if (over < GRACE_MIN) return;                        // 開始+GRACE未満はまだ（上限なし＝未打刻の間は対象）
     const stH = pad2(Math.floor(p.start / 60)), stM = pad2(p.start % 60);
     late.push({ store: p.store, staff: p.name, startHHMM: stH + ':' + stM, elapsedMin: over });
   });
@@ -256,9 +280,65 @@ async function detectLateOpenShifts(page, now) {
 
   if (!byChannel.size) { console.log('LINE WORKS送信対象なし', hhmm(now)); return; }
 
-  const token = await lwToken();
-  for (const [ch, cases] of byChannel) {
-    await lwPostChannel(token, ch, buildMessage(now, cases));
-    console.log('LINE WORKS通知 完了 ch=' + ch + ':', cases.map((c) => c.store + '/' + c.staff).join(', '));
+  const channels = [...byChannel.keys()];
+
+  // テストは状態管理なしで1回だけ投稿（ルーティング＋@All疎通確認）
+  if (TEST) {
+    const token = await lwToken();
+    for (const ch of channels) await lwPostChannel(token, ch, buildMessage(now, byChannel.get(ch)));
+    console.log('LINE WORKS通知(TEST):', channels.join(', '));
+    return;
   }
+
+  // ▼ 再送ステートマシン（GASで各グループの状態を管理）
+  //   初回=即送信 / 以降=前回送信から RESEND_MIN 経過かつ「その後に返信なし」なら再送 /
+  //   返信があった・本人が打刻した(=未出勤から外れ late に出ない)・送信が MAX_SENDS 到達 → 停止。
+  const nowMs = Date.now();
+  const today = todayKey(now);
+  const resp = await gasLww({ lww: 'get', channels });
+  const states = (resp && resp.ok && resp.states) ? resp.states : null;
+
+  // ▼ 安全フォールバック: lww状態が取れない（GAS障害・URL/RUN_SECRET不一致等）場合は、
+  //   状態管理なしの“窓方式”で「1回だけ」投稿し、5分おきの多重投稿を防ぐ（アラートは失わない）。
+  if (!states) {
+    console.log('⚠️ lww状態取得に失敗。窓方式(1回通知)にフォールバック', hhmm(now));
+    if (now.getUTCMinutes() < 5) { // 管理者向け警告は毎時1回に抑制
+      await slackNotice('⚠️ shift-watch: 再送用GAS(lww)に接続できず、15分再送は無効・1回通知にフォールバック中です。LWW_WEBAPP_URL / RUN_SECRET を確認してください。');
+    }
+    const WINDOW = 5; // ≒cron間隔。遅れ発生直後の1ポーリングだけ命中させる
+    const tokenFb = await lwToken();
+    for (const ch of channels) {
+      const cases = byChannel.get(ch);
+      if (cases.some((c) => c.elapsedMin >= GRACE_MIN && c.elapsedMin < GRACE_MIN + WINDOW)) {
+        await lwPostChannel(tokenFb, ch, buildMessage(now, cases));
+        console.log('LINE WORKS通知(窓/フォールバック) ch=' + ch);
+      }
+    }
+    return;
+  }
+
+  const toSend = [];
+  for (const ch of channels) {
+    const s = states[ch] || {};
+    const isToday = s.day === today;
+    const count = isToday ? (s.count || 0) : 0;
+    const firstAlertTs = isToday ? (s.firstAlertTs || 0) : 0;
+    const lastAlertTs = isToday ? (s.lastAlertTs || 0) : 0;
+    const replied = !!(s.lastReplyTs && firstAlertTs && s.lastReplyTs > firstAlertTs); // 初回アラート後に返信あり
+    if (count === 0) { toSend.push(ch); }                                  // 初回
+    else if (replied) { console.log('停止(返信あり) ch=' + ch); }
+    else if (count >= MAX_SENDS) { console.log('停止(上限) ch=' + ch); }
+    else if (nowMs - lastAlertTs >= RESEND_MIN * 60 * 1000) { toSend.push(ch); } // 再送
+    else { console.log('待機(間隔内) ch=' + ch); }
+  }
+
+  if (!toSend.length) { console.log('送信なし（返信済/間隔内/上限/打刻）', hhmm(now)); return; }
+
+  const token = await lwToken();
+  for (const ch of toSend) {
+    await lwPostChannel(token, ch, buildMessage(now, byChannel.get(ch)));
+    console.log('LINE WORKS通知 ch=' + ch + ':', byChannel.get(ch).map((c) => c.store + '/' + c.staff).join(', '));
+  }
+  // 送信したチャンネルの状態を更新（lastAlertTs=now, count++。初回は day/firstAlertTs も設定）
+  await gasLww({ lww: 'alert', channels: toSend, now: nowMs, day: today });
 })().catch((e) => { console.error(e); process.exit(1); });

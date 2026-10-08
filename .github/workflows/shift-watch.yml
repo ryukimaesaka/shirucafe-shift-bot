@@ -1,6 +1,7 @@
 name: shift-watch
-# OP(開店)シフトイン遅れの見張り。5分おきに実行し、未打刻の遅刻を LINE WORKS グループへ @All で1回通知。
-# 「1回だけ」は shift-watch.js の窓方式（elapsed∈[GRACE,GRACE+WINDOW)）で実現。再通知・停止なし。
+# OP(開店)シフトイン遅れの見張り。5分おきに実行し、未打刻の遅刻を LINE WORKS 店舗グループへ @All で通知。
+# 初回通知後、そのグループで「返信」も「本人の打刻」も無ければ RESEND_MIN(15分)おきに同じ文を再送（最大 MAX_SENDS 回）。
+# 返信検知は GAS(doPostのLINE WORKSコールバック) が最終返信時刻を記録し、shift-watch が lww:get で参照する。
 # ※GitHub Actionsのschedule(cron)は遅延・間引きが大きいため、本番の5分間隔は
 #   cron-job.org から workflow_dispatch を叩いて駆動する（shift-import/shift-tickと同型）。
 on:
@@ -37,7 +38,10 @@ jobs:
           LW_CHANNEL_MAP: ${{ secrets.LW_CHANNEL_MAP }}
           LW_DEFAULT_CHANNEL_ID: ${{ secrets.LW_DEFAULT_CHANNEL_ID }}
           SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}
+          LWW_WEBAPP_URL: ${{ secrets.LWW_WEBAPP_URL }}
+          RUN_SECRET: ${{ secrets.RUN_SECRET }}
           GRACE_MIN: '5'
-          ALERT_WINDOW_MIN: '5'
+          RESEND_MIN: '15'
+          MAX_SENDS: '4'
           OPEN_FROM: '6'
           OPEN_TO: '23'
