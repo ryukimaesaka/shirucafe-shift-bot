@@ -236,9 +236,6 @@ async function detectLateOpenShifts(page, now) {
     console.log('監視時間外', hhmm(now)); return;
   }
 
-  // 送り先不明時の保険（セッション切れ通知等）。DEFAULT→マップ先頭の順で1つ。
-  const anyChannel = () => LW_DEFAULT_CHANNEL_ID || Object.values(LW_CHANNEL_MAP)[0] || '';
-
   let late = [];
   let storesByNum = {};
   if (TEST) {
@@ -255,8 +252,13 @@ async function detectLateOpenShifts(page, now) {
     const page = await ctx.newPage();
     try {
       if (!(await checkLoggedIn(page))) {
-        // セッション切れは監視の生命線。LINE WORKSへ（@Allなしで・保険の1チャンネルへ）通知して失敗終了。
-        try { const ch = anyChannel(); if (ch) await lwPostChannel(await lwToken(), ch, '⚠️ 遅刻ウォッチャー: ジョブカンのセッション切れ。`node login.js`→JC_STATE更新を。'); } catch (_) {}
+        // セッション切れ: 店舗グループ(LINE WORKS)には出さない。管理者Slack(自分あて)へ毎時1回だけ通知してスパムを防ぐ。
+        //   ※5分間隔で叩かれるので「毎時00〜04分の回」だけ通知＝最大1回/時。
+        if (now.getUTCMinutes() < 5) {
+          await slackNotice('⚠️ 遅刻ウォッチャー: ジョブカンのセッション切れで遅刻検知が止まっています。`node login.js` → GitHub Secret `JC_STATE` を更新してください。');
+        } else {
+          console.log('セッション切れ（Slack通知は毎時1回に抑制・今回は抑制）', hhmm(now));
+        }
         await ctx.close(); await browser.close(); process.exit(20);
       }
       const res = await detectLateOpenShifts(page, now);
