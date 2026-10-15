@@ -60,19 +60,24 @@ const OPEN_TO = parseInt(process.env.OPEN_TO || '23', 10);
 // ※本番のシフト取込GAS(GAS_WEBAPP_URL)とは別エンドポイント。混同しないよう LWW_WEBAPP_URL を使う。
 const LWW_WEBAPP_URL = process.env.LWW_WEBAPP_URL || '';
 const RUN_SECRET = process.env.RUN_SECRET || '';
-// GASの /exec はPOST応答を302でgoogleusercontentへ飛ばす仕様で、稀にリダイレクト先がHTMLエラーを返す。
-// その場合 r.json() が失敗する（＝状態取得できず窓方式フォールバックに落ちる）ため、最大3回リトライする。
+// GASの /exec はPOST応答を302でgoogleusercontentへ飛ばす仕様で、ランナー(データセンターIP)からだと
+// 稀にリダイレクト先がHTMLエラー(約7900字)を返し r.json() が失敗する（＝窓方式フォールバックに落ちる）。
+// 悪い窓が数秒続くことがあるため get は 5回・バックオフ(1→2→3→4s)でリトライし、UAも付けて成功率を上げる。
 async function gasLww(payload) {
   if (!LWW_WEBAPP_URL || !RUN_SECRET) return null;
   const body = JSON.stringify(Object.assign({ secret: RUN_SECRET }, payload));
   // 'alert'(書込み)はdoPost到達時点で状態が書かれる＝応答がHTMLでも成功。リトライすると二重加算になるので1回のみ。
-  // 'get'(読み取り)は冪等で、応答JSONが必要。リダイレクト揺らぎでHTMLが返ることがあるので最大3回リトライ。
-  const maxAttempts = payload && payload.lww === 'alert' ? 1 : 3;
+  // 'get'(読み取り)は冪等で応答JSONが必要。リダイレクト揺らぎに強くするため最大5回リトライ。
+  const maxAttempts = payload && payload.lww === 'alert' ? 1 : 5;
+  const headers = {
+    'Content-Type': 'application/json',
+    // undici既定UA(node)だとGoogle側がエラーページを返しやすい疑い → ブラウザ風UAを付与
+    'User-Agent': 'Mozilla/5.0 (compatible; shiftwatch/1.0; +https://github.com/ryukimaesaka/shirucafe-shift-bot)',
+  };
   for (let attempt = 1; attempt <= maxAttempts; attempt++) {
     try {
       const r = await fetch(LWW_WEBAPP_URL, {
-        method: 'POST', headers: { 'Content-Type': 'application/json' },
-        body, redirect: 'follow', signal: AbortSignal.timeout(30000),
+        method: 'POST', headers, body, redirect: 'follow', signal: AbortSignal.timeout(30000),
       });
       const text = await r.text();
       try {
@@ -86,7 +91,7 @@ async function gasLww(payload) {
     } catch (e) {
       console.log(`GAS lww 通信失敗(${payload && payload.lww} attempt ${attempt}/${maxAttempts})`, e.message);
     }
-    if (attempt < maxAttempts) await new Promise((res) => setTimeout(res, 1500));
+    if (attempt < maxAttempts) await new Promise((res) => setTimeout(res, attempt * 1000)); // 1s,2s,3s,4s
   }
   return null;
 }
@@ -323,9 +328,16 @@ async function detectLateOpenShifts(page, now) {
   // ▼ 安全フォールバック: lww状態が取れない（GAS障害・URL/RUN_SECRET不一致等）場合は、
   //   状態管理なしの“窓方式”で「1回だけ」投稿し、5分おきの多重投稿を防ぐ（アラートは失わない）。
   if (!states) {
-    console.log('⚠️ lww状態取得に失敗。窓方式(1回通知)にフォールバック', hhmm(now));
-    if (now.getUTCMinutes() < 5) { // 管理者向け警告は毎時1回に抑制
-      await slackNotice('⚠️ shift-watch: 再送用GAS(lww)に接続できず、15分再送は無効・1回通知にフォールバック中です。LWW_WEBAPP_URL / RUN_SECRET を確認してください。');
+    const configMissing = !LWW_WEBAPP_URL || !RUN_SECRET;
+    console.log('⚠️ lww状態取得に失敗。窓方式(1回通知)にフォールバック', hhmm(now), configMissing ? '(設定未検出)' : '(一時的な接続失敗)');
+    // 警告ノイズ抑制: フォールバック自体は「1回通知」で安全に縮退できている。
+    //   ・設定未検出(URL/SECRETが空=本当の設定ミス) → 早く気付きたいので毎時1回。
+    //   ・一時的な接続失敗(リトライ5回しても不通) → 1日1回(JST10:00台)だけ。恒常的に壊れていればこれで気付ける。
+    const warn = configMissing ? (now.getUTCMinutes() < 5) : (now.getUTCHours() === 10 && now.getUTCMinutes() < 5);
+    if (warn) {
+      await slackNotice(configMissing
+        ? '⚠️ shift-watch: 再送用GAS(lww)の設定が未検出です（15分再送が無効）。GitHub Secret `LWW_WEBAPP_URL` / `RUN_SECRET` を確認してください。'
+        : '⚠️ shift-watch: 再送用GAS(lww)への接続が不安定で、本日フォールバック(1回通知)が発生しました。通知自体は届いています。頻発する場合のみ対応します。');
     }
     const WINDOW = 5; // ≒cron間隔。遅れ発生直後の1ポーリングだけ命中させる
     const tokenFb = await lwToken();
