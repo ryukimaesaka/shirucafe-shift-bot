@@ -111,11 +111,14 @@ async function clickDownload(page, opt) {
   await page.mouse.click(box.x, box.y); // 信頼できる実クリック（ユーザー操作維持）
 }
 
-// 申請(希望)DL。当月・申請中(status=9)を検索URLで直接指定→DLボタン。CSVテキストを返す。
+// 申請(希望)DL。シフト希望は「前月に翌月分を集める」運用のため、対象は【翌月】・申請中(status=9)。
+//   例: 10月に実行すると11月分の希望を取得。年跨ぎ(12月→翌1月)も自動で処理。
+//   ※当月固定だと、集めている月(翌月)を見られず「提出なし」だらけになるため翌月に変更(2026-10)。
 async function downloadRequests(page) {
   const n = jstNow();
-  const y = n.getUTCFullYear(), m = n.getUTCMonth() + 1;
-  const last = new Date(Date.UTC(y, m, 0)).getUTCDate();
+  const nm = new Date(Date.UTC(n.getUTCFullYear(), n.getUTCMonth() + 1, 1)); // 翌月の1日
+  const y = nm.getUTCFullYear(), m = nm.getUTCMonth() + 1;                   // 翌月(1-based)
+  const last = new Date(Date.UTC(y, m, 0)).getUTCDate();                     // 翌月末日
   const q = new URLSearchParams({
     search_type: 'month', year: String(y), month: String(m),
     'from[y]': String(y), 'from[m]': String(m), 'from[d]': '1',
