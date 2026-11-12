@@ -4,6 +4,9 @@ node_modules/
 sa.json
 downloads/
 *.csv
+# 認証情報（公開リポジトリに絶対入れない）
+gh_pat.txt
+.gh_pat
 # セッション・一時ファイル（公開リポジトリに絶対入れない）
 jc_state.json
 state.json
