@@ -55,6 +55,9 @@ const RESEND_MIN = parseInt(process.env.RESEND_MIN || '15', 10); // 返信/打�
 const MAX_SENDS = parseInt(process.env.MAX_SENDS || '4', 10);    // 初回含む最大送信回数(=初回+最大3回再送)
 const OPEN_FROM = parseInt(process.env.OPEN_FROM || '6', 10);
 const OPEN_TO = parseInt(process.env.OPEN_TO || '23', 10);
+// 一時除外する店舗番号（カンマ区切り）。立ち上げ初期で（店舗）グループ未作成の店など。
+//   対象店は OP遅刻通知も、未登録(新店)アラートも出さない（Slack退避もしない）。グループ作成後に外す。
+const EXCLUDE_STORES = new Set((process.env.EXCLUDE_STORES || '').split(',').map((s) => s.trim()).filter(Boolean));
 
 // 専用GAS(lww-webapp)で「各グループの最終返信時刻／アラート状態」を管理（返信検知＝再送停止用）。
 // ※本番のシフト取込GAS(GAS_WEBAPP_URL)とは別エンドポイント。混同しないよう LWW_WEBAPP_URL を使う。
@@ -271,6 +274,15 @@ async function detectLateOpenShifts(page, now) {
     } finally {
       try { await ctx.close(); await browser.close(); } catch (_) {}
     }
+  }
+
+  // ▼ 一時除外店舗を適用: OP遅刻も未登録アラートも出さないよう late / storesByNum から落とす。
+  if (EXCLUDE_STORES.size) {
+    const numOf = (store) => { const m = String(store).match(/^(\d{2,3})/); return m ? m[1] : ''; };
+    const before = late.length;
+    late = late.filter((c) => !EXCLUDE_STORES.has(numOf(c.store)));
+    for (const n of EXCLUDE_STORES) delete storesByNum[n];
+    console.log('一時除外店舗:', [...EXCLUDE_STORES].join(',') + '（late ' + before + '→' + late.length + '件）');
   }
 
   // ▼ 新店(未登録)検知: ジョブカンに居るが LW_CHANNEL_MAP に無い店番号 → 毎日10時台に1回Slack通知。

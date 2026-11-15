@@ -45,3 +45,5 @@ jobs:
           MAX_SENDS: '4'
           OPEN_FROM: '6'
           OPEN_TO: '23'
+          # 一時除外店舗（立ち上げ初期で（店舗）グループ未作成）。グループ作成＆LW_CHANNEL_MAP登録後に外す。
+          EXCLUDE_STORES: '135'  # 135同志社女子大学（京田辺）店（2026-11-15 一時除外）
